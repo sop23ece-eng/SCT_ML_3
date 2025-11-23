@@ -1,0 +1,186 @@
+# 1. Install Kaggle API client
+!pip install -q kaggle
+
+# 2. Configure Kaggle API access
+#    - Upload your 'kaggle.json' file to the Colab environment.
+#    - Run these commands:
+!mkdir -p ~/.kaggle
+!cp kaggle.json ~/.kaggle/
+!chmod 600 ~/.kaggle/kaggle.json
+
+# 3. Download and Unzip the dataset
+!kaggle competitions download -c dogs-vs-cats
+!unzip -q train.zip -d .
+
+# 4. Optional: Set Runtime to GPU for faster training (as shown in the video [00:19:29])
+#    Go to Runtime -> Change runtime type -> Hardware accelerator: GPU
+"""
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (
+    Conv2D, MaxPooling2D, Flatten, Dense, BatchNormalization, Dropout
+)
+import os
+import shutil
+import glob
+
+# Define constants
+IMAGE_SIZE = (256, 256)
+BATCH_SIZE = 32
+RANDOM_SEED = 42
+TRAIN_DIR = 'train' # Folder created by unzipping the data
+
+print("TensorFlow Version:", tf.__version__)
+
+# --- 2. VITAL: FILE ORGANIZATION ---
+
+def organize_files(base_dir):
+    """
+    Searches for image files recursively within base_dir and moves them
+    into 'Cat' and 'Dog' subdirectories for Keras loading.
+    This resolves common Kaggle directory structure issues.
+    """
+    print("\n--- Starting File Organization for Keras Loading ---")
+    
+    # Create final destination folders if they don't exist
+    cat_dir = os.path.join(base_dir, 'Cat')
+    dog_dir = os.path.join(base_dir, 'Dog')
+    os.makedirs(cat_dir, exist_ok=True)
+    os.makedirs(dog_dir, exist_ok=True)
+
+    # Find all JPEG files recursively in the current directory (including subfolders)
+    # The image file names are typically 'cat.123.jpg' or 'dog.456.jpg'
+    all_files = glob.glob(f'{base_dir}/**/*.jpg', recursive=True)
+    
+    cat_files = [f for f in all_files if 'cat' in os.path.basename(f) and not os.path.dirname(f).endswith('Cat')]
+    dog_files = [f for f in all_files if 'dog' in os.path.basename(f) and not os.path.dirname(f).endswith('Dog')]
+    
+    moved_cats = 0
+    for f in cat_files:
+        try:
+            shutil.move(f, os.path.join(cat_dir, os.path.basename(f)))
+            moved_cats += 1
+        except:
+            pass # Ignore files that might already be in the target folder
+
+    moved_dogs = 0
+    for f in dog_files:
+        try:
+            shutil.move(f, os.path.join(dog_dir, os.path.basename(f)))
+            moved_dogs += 1
+        except:
+            pass # Ignore files that might already be in the target folder
+            
+    if moved_cats > 0 or moved_dogs > 0:
+        print(f"Moved {moved_cats} cat images and {moved_dogs} dog images into subfolders.")
+    else:
+        print("Files appear to be already organized or no new files were found.")
+    
+    print("--- File Organization Complete ---")
+    
+# Run the organization script before loading the data
+organize_files(TRAIN_DIR)
+
+
+# --- 3. DATA GENERATION AND NORMALIZATION ---
+
+# A. Create the Data Generators (using image_dataset_from_directory [00:08:44])
+# This function handles reading images, resizing, and inferring labels automatically.
+train_ds = tf.keras.utils.image_dataset_from_directory(
+    TRAIN_DIR,
+    labels='inferred',
+    label_mode='int', # 0 for Cat, 1 for Dog (as inferred from folder names)
+    image_size=IMAGE_SIZE,
+    batch_size=BATCH_SIZE,
+    seed=RANDOM_SEED,
+    validation_split=0.2, # Use 20% of the training data for validation
+    subset='training'
+)
+
+validation_ds = tf.keras.utils.image_dataset_from_directory(
+    TRAIN_DIR,
+    labels='inferred',
+    label_mode='int',
+    image_size=IMAGE_SIZE,
+    batch_size=BATCH_SIZE,
+    seed=RANDOM_SEED,
+    validation_split=0.2,
+    subset='validation'
+)
+
+# B. Normalization Function (dividing pixel values by 255.0 [00:12:15])
+def normalize_img(image, label):
+  """Scales pixel values to [0, 1]."""
+  return tf.cast(image, tf.float32) / 255.0, label
+
+# Apply the normalization function to both datasets using the map function
+train_ds = train_ds.map(normalize_img)
+validation_ds = validation_ds.map(normalize_img)
+
+# Prefetching for performance
+train_ds = train_ds.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
+validation_ds = validation_ds.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
+
+
+# --- 4. MODEL ARCHITECTURE (CNN with Regularization [00:22:15]) ---
+
+model = Sequential([
+    # Input Layer is implicitly handled by the first Conv2D layer
+    
+    # Block 1 (32 Filters)
+    Conv2D(32, (3, 3), activation='relu', input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3)),
+    BatchNormalization(), # Added for stabilization/regularization
+    MaxPooling2D((2, 2)),
+    
+    # Block 2 (64 Filters)
+    Conv2D(64, (3, 3), activation='relu'),
+    BatchNormalization(),
+    MaxPooling2D((2, 2)),
+    Dropout(0.25), # Added for regularization
+    
+    # Block 3 (128 Filters)
+    Conv2D(128, (3, 3), activation='relu'),
+    BatchNormalization(),
+    MaxPooling2D((2, 2)),
+    Dropout(0.25), 
+    
+    # Flattening for the Dense layers
+    Flatten(),
+    
+    # Dense Layer 1
+    Dense(128, activation='relu'),
+    BatchNormalization(),
+    Dropout(0.5),
+    
+    # Output Layer (Binary Classification: Cat or Dog [00:16:49])
+    Dense(1, activation='sigmoid') 
+])
+
+# Display model structure
+print("\n--- Model Summary ---")
+model.summary()
+print("-" * 35)
+
+# --- 5. COMPILE AND TRAIN ---
+
+# Compile the model [00:17:36]
+model.compile(
+    optimizer='adam',
+    loss='binary_crossentropy', 
+    metrics=['accuracy']
+)
+
+# Train the model [00:18:12]
+print("\n--- Starting Model Training ---")
+history = model.fit(
+    train_ds,
+    epochs=10, 
+    validation_data=validation_ds
+)
+
+print("\n--- Training Complete ---")
+
+# The final part of the video (plotting graphs and prediction on unseen data) 
+# requires additional libraries like matplotlib and OpenCV (cv2) which are not 
+# included here, but the core training is complete.
